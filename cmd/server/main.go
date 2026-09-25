@@ -40,13 +40,16 @@ func run(log *slog.Logger) error {
 	}
 
 	// Where the index lives is behind promo.IndexSource; a file today.
+	// codes holds the current set; validator applies the rules to it; Reload
+	// loads from the source and decides whether to accept what it got.
 	index := promo.FileIndex{Path: indexPath}
-	validator := promo.NewSetValidator(nil)
+	codes := &promo.CodeSet{}
+	validator := promo.RuleValidator{Codes: codes}
 	start := time.Now()
-	if _, err := validator.LoadFrom(context.Background(), index); err != nil {
+	if _, err := promo.Reload(context.Background(), index, codes); err != nil {
 		return err
 	}
-	log.Info("coupon index loaded", "source", index.String(), "codes", validator.Len(), "took", time.Since(start))
+	log.Info("coupon index loaded", "source", index.String(), "codes", codes.Len(), "took", time.Since(start))
 
 	products, err := catalog.NewSeeded()
 	if err != nil {
@@ -70,7 +73,7 @@ func run(log *slog.Logger) error {
 	signal.Notify(hup, syscall.SIGHUP)
 	go func() {
 		for range hup {
-			n, err := validator.LoadFrom(context.Background(), index)
+			n, err := promo.Reload(context.Background(), index, codes)
 			if err != nil {
 				log.Error("coupon index reload failed; keeping old index", "err", err)
 				continue

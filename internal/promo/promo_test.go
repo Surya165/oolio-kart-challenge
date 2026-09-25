@@ -7,11 +7,12 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 )
 
-func TestSetValidator(t *testing.T) {
-	v := NewSetValidator([]string{"HAPPYHRS", "FIFTYOFF", "NINECHARS", "TENCHARS10"})
+func TestRuleValidator(t *testing.T) {
+	v := RuleValidator{Codes: NewCodeSet([]string{"HAPPYHRS", "FIFTYOFF", "NINECHARS", "TENCHARS10"})}
 	tests := []struct {
 		name string
 		code string
@@ -41,15 +42,71 @@ func TestSetValidator(t *testing.T) {
 	}
 }
 
-func TestSetValidatorReplace(t *testing.T) {
-	v := NewSetValidator([]string{"OLDCODE1"})
-	v.Replace([]string{"NEWCODE1"})
-	if ok, _ := v.Valid(context.Background(), "OLDCODE1"); ok {
-		t.Error("old code still valid after Replace")
+// lookupFunc adapts a function to CodeLookup, to show RuleValidator works
+// against any lookup, not just CodeSet.
+type lookupFunc func(string) bool
+
+func (f lookupFunc) Contains(code string) bool { return f(code) }
+
+func TestRuleValidatorChecksLengthBeforeLookup(t *testing.T) {
+	var looked []string
+	v := RuleValidator{Codes: lookupFunc(func(c string) bool { looked = append(looked, c); return true })}
+	for _, code := range []string{"SHORT", "WAYTOOLONGCODE", "HAPPYHRS"} {
+		v.Valid(context.Background(), code)
 	}
-	if ok, _ := v.Valid(context.Background(), "NEWCODE1"); !ok {
-		t.Error("new code not valid after Replace")
+	if !slices.Equal(looked, []string{"HAPPYHRS"}) {
+		t.Fatalf("lookups = %v, want only the valid-length code", looked)
 	}
+}
+
+func TestCodeSet(t *testing.T) {
+	var zero CodeSet // zero value is an empty, usable set
+	if zero.Contains("HAPPYHRS") || zero.Len() != 0 {
+		t.Fatal("zero-value CodeSet should be empty")
+	}
+
+	s := NewCodeSet([]string{"OLDCODE1"})
+	s.Replace([]string{"NEWCODE1", "NEWCODE2"})
+	if s.Contains("OLDCODE1") {
+		t.Error("old code still present after Replace")
+	}
+	if !s.Contains("NEWCODE1") || s.Len() != 2 {
+		t.Errorf("after Replace: Contains(NEWCODE1)=%v Len=%d", s.Contains("NEWCODE1"), s.Len())
+	}
+}
+
+// Run with -race: readers and a writer hammer the set at the same time. Every
+// read must see one whole set (A or B), never a mix or a torn map.
+func TestCodeSetConcurrentReadsAndReplace(t *testing.T) {
+	setA := []string{"AAAAAAAA"}
+	setB := []string{"BBBBBBBB"}
+	s := NewCodeSet(setA)
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+	for r := 0; r < 8; r++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				a, b := s.Contains("AAAAAAAA"), s.Contains("BBBBBBBB")
+				_ = a || b // each Contains sees a complete set
+			}
+		}()
+	}
+	for i := 0; i < 1000; i++ {
+		if i%2 == 0 {
+			s.Replace(setB)
+		} else {
+			s.Replace(setA)
+		}
+	}
+	close(stop)
+	wg.Wait()
 }
 
 func TestIndexRoundTrip(t *testing.T) {
@@ -106,7 +163,7 @@ func TestFileIndex(t *testing.T) {
 }
 
 // fakeSource is an in-memory IndexSource, standing in for S3 or any other
-// backend: LoadFrom's rules must hold whatever the storage is.
+// backend: Reload's rules must hold whatever the storage is.
 type fakeSource struct {
 	codes []string
 	err   error
@@ -114,12 +171,12 @@ type fakeSource struct {
 
 func (f fakeSource) Load(context.Context) ([]string, error) { return f.codes, f.err }
 
-func TestLoadFrom(t *testing.T) {
+func TestReload(t *testing.T) {
 	ctx := context.Background()
-	v := NewSetValidator(nil)
+	set := &CodeSet{}
 
-	if n, err := v.LoadFrom(ctx, fakeSource{codes: []string{"HAPPYHRS", "FIFTYOFF"}}); err != nil || n != 2 {
-		t.Fatalf("LoadFrom = %d, %v; want 2, nil", n, err)
+	if n, err := Reload(ctx, fakeSource{codes: []string{"HAPPYHRS", "FIFTYOFF"}}, set); err != nil || n != 2 {
+		t.Fatalf("Reload = %d, %v; want 2, nil", n, err)
 	}
 
 	// A failed or empty reload must keep the codes already being served.
@@ -133,11 +190,11 @@ func TestLoadFrom(t *testing.T) {
 	}
 	for _, tt := range bad {
 		t.Run(tt.name, func(t *testing.T) {
-			if _, err := v.LoadFrom(ctx, tt.src); !errors.Is(err, tt.wantErr) {
+			if _, err := Reload(ctx, tt.src, set); !errors.Is(err, tt.wantErr) {
 				t.Fatalf("err = %v, want %v", err, tt.wantErr)
 			}
-			if ok, _ := v.Valid(ctx, "HAPPYHRS"); !ok || v.Len() != 2 {
-				t.Fatalf("old index lost after bad reload (len %d)", v.Len())
+			if !set.Contains("HAPPYHRS") || set.Len() != 2 {
+				t.Fatalf("old index lost after bad reload (len %d)", set.Len())
 			}
 		})
 	}
@@ -145,7 +202,7 @@ func TestLoadFrom(t *testing.T) {
 	// A file that only has a header is empty too.
 	p := filepath.Join(t.TempDir(), "header-only.txt")
 	os.WriteFile(p, []byte("# 0 valid codes\n"), 0o644)
-	if _, err := v.LoadFrom(ctx, FileIndex{Path: p}); !errors.Is(err, ErrEmptyIndex) {
+	if _, err := Reload(ctx, FileIndex{Path: p}, set); !errors.Is(err, ErrEmptyIndex) {
 		t.Fatalf("header-only file: err = %v, want ErrEmptyIndex", err)
 	}
 }

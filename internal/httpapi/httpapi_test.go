@@ -26,7 +26,7 @@ func newTestServer(t *testing.T) (*httptest.Server, *order.MemoryRepository) {
 		Catalog: products,
 		Orders: &order.Service{
 			Catalog: products,
-			Promo:   promo.NewSetValidator([]string{"HAPPYHRS", "FIFTYOFF"}),
+			Promo:   promo.RuleValidator{Codes: promo.NewCodeSet([]string{"HAPPYHRS", "FIFTYOFF"})},
 			Repo:    repo,
 		},
 		APIKey: "apitest",
@@ -215,7 +215,7 @@ func TestReadiness(t *testing.T) {
 	var ready atomic.Bool
 	s := &Server{
 		Catalog: products,
-		Orders:  &order.Service{Catalog: products, Promo: promo.NewSetValidator(nil), Repo: order.NewMemoryRepository()},
+		Orders:  &order.Service{Catalog: products, Promo: promo.RuleValidator{Codes: &promo.CodeSet{}}, Repo: order.NewMemoryRepository()},
 		Log:     slog.New(slog.NewTextHandler(io.Discard, nil)),
 		Ready:   ready.Load,
 	}

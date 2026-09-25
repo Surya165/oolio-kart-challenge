@@ -33,7 +33,7 @@ A code is valid if it's 8–10 characters long and appears in at least two of th
 So validation is split in two:
 
 - **Offline:** `cmd/couponindex` reads the files once and writes the valid codes to `data/valid_coupons.txt`. That comes out to 8 codes.
-- **Server:** loads that file at startup into an in-memory set behind the `promo.Validator` interface. Sending `SIGHUP` reloads it without a restart. An empty index is rejected (at startup and on reload), so a broken build can't silently disable every coupon. Where the index is stored sits behind two small interfaces, `promo.IndexSource` (server loads) and `promo.IndexSink` (builder publishes), so the local file can be swapped for S3 or similar without changing either program.
+- **Server:** loads that file at startup and checks codes through the `promo.Validator` interface. Three small pieces sit behind it: `RuleValidator` applies the rules, `CodeSet` holds the current codes and swaps them atomically, and `Reload` decides whether a newly loaded index is acceptable. Sending `SIGHUP` reloads it without a restart. An empty index is rejected (at startup and on reload), so a broken build can't silently disable every coupon. Where the index is stored sits behind two small interfaces, `promo.IndexSource` (server loads) and `promo.IndexSink` (builder publishes), so the local file can be swapped for S3 or similar without changing either program.
 
 The builder has two engines, chosen with `-engine`:
 

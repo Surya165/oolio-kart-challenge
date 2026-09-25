@@ -3,19 +3,22 @@
 // Validation is split in two phases:
 //   - Build (offline, see internal/couponbuild and cmd/couponindex): stream the
 //     raw coupon files once and derive the small set of codes that satisfy the
-//     rules, written as an index file (index.go describes the format).
-//   - Serve (this package): load that derived set into memory and answer lookups.
+//     rules, published as an index (index.go).
+//   - Serve (this package): load that index into memory and answer lookups.
 //
-// Request handlers only ever see the Validator interface, so the backing
-// implementation (in-memory set, Redis, Postgres, ...) can change without
-// touching HTTP code.
+// The serving side has three parts, each with one job:
+//   - RuleValidator (this file): applies the promo rules. Owns no state.
+//   - CodeSet (codeset.go): holds the current codes and swaps them atomically.
+//     Knows no rules.
+//   - Reload (reload.go): loads an index from a source and decides whether to
+//     accept it. Knows neither rules nor storage internals.
+//
+// Request handlers only ever see the Validator interface, so any of these can
+// be replaced (e.g. a Redis- or Postgres-backed lookup) without touching HTTP
+// code.
 package promo
 
-import (
-	"context"
-	"fmt"
-	"sync/atomic"
-)
+import "context"
 
 // Length bounds from the challenge rules.
 const (
@@ -28,61 +31,34 @@ type Validator interface {
 	Valid(ctx context.Context, code string) (bool, error)
 }
 
-// ValidLength reports whether code satisfies the length rule. It is a cheap
-// pre-check that lets us reject obviously bad codes before any lookup.
+// CodeLookup answers whether a code is in the current set of valid codes.
+// CodeSet is the in-memory implementation; a database-backed one could
+// satisfy it too.
+type CodeLookup interface {
+	Contains(code string) bool
+}
+
+// ValidLength reports whether code satisfies the length rule.
 func ValidLength(code string) bool {
 	return len(code) >= MinLen && len(code) <= MaxLen
 }
 
-// SetValidator is an in-memory Validator backed by a precomputed set of valid
-// codes. Lookups are lock-free: the set is immutable once published, and
-// Replace swaps it atomically, so a refresh never blocks readers.
-type SetValidator struct {
-	codes atomic.Pointer[map[string]struct{}]
+// RuleValidator applies the promo rules: the length rule first (cheap, no
+// lookup needed), then membership in the precomputed set. New rules (expiry,
+// per-merchant codes, ...) belong here; storage does not.
+//
+// Codes are matched exactly (case-sensitive): every code in the source files
+// is uppercase alphanumeric, and we treat codes as identifiers rather than
+// guess at normalisation.
+type RuleValidator struct {
+	Codes CodeLookup
 }
 
-// NewSetValidator returns a validator holding exactly the given codes.
-func NewSetValidator(codes []string) *SetValidator {
-	v := &SetValidator{}
-	v.Replace(codes)
-	return v
-}
+var _ Validator = RuleValidator{}
 
-// Valid matches codes exactly (case-sensitive). Every code in the source files
-// is uppercase alphanumeric; we treat codes as identifiers and do not guess at
-// normalisation.
-func (v *SetValidator) Valid(_ context.Context, code string) (bool, error) {
+func (v RuleValidator) Valid(_ context.Context, code string) (bool, error) {
 	if !ValidLength(code) {
 		return false, nil
 	}
-	_, ok := (*v.codes.Load())[code]
-	return ok, nil
+	return v.Codes.Contains(code), nil
 }
-
-// Replace atomically swaps in a new set of valid codes.
-func (v *SetValidator) Replace(codes []string) {
-	m := make(map[string]struct{}, len(codes))
-	for _, c := range codes {
-		m[c] = struct{}{}
-	}
-	v.codes.Store(&m)
-}
-
-// LoadFrom loads codes from src and swaps them in. If loading fails or the
-// index is empty, the current codes stay in place and an error is returned,
-// so a bad reload never takes coupons offline. It returns the number of codes
-// now loaded.
-func (v *SetValidator) LoadFrom(ctx context.Context, src IndexSource) (int, error) {
-	codes, err := src.Load(ctx)
-	if err != nil {
-		return 0, err
-	}
-	if len(codes) == 0 {
-		return 0, fmt.Errorf("%v: %w", src, ErrEmptyIndex)
-	}
-	v.Replace(codes)
-	return len(codes), nil
-}
-
-// Len returns the number of codes currently loaded.
-func (v *SetValidator) Len() int { return len(*v.codes.Load()) }
