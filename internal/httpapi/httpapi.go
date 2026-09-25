@@ -32,6 +32,9 @@ type Server struct {
 	Orders  *order.Service
 	APIKey  string
 	Log     *slog.Logger
+	// Ready reports whether this instance should receive traffic. Nil means
+	// always ready.
+	Ready func() bool
 }
 
 // Handler returns the routed, middleware-wrapped handler.
@@ -40,11 +43,55 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/product", s.listProducts)
 	mux.HandleFunc("GET /api/product/{productId}", s.getProduct)
 	mux.Handle("POST /api/order", s.requireAPIKey(http.HandlerFunc(s.placeOrder)))
+	// Liveness: the process is up. Readiness: it should get traffic (false
+	// before startup finishes and once graceful shutdown starts).
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
-	return s.recoverer(s.logRequests(mux))
+	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, _ *http.Request) {
+		if s.Ready != nil && !s.Ready() {
+			writeError(w, http.StatusServiceUnavailable, "not ready")
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+	return s.recoverer(s.logRequests(jsonRouteErrors(mux)))
 }
+
+// jsonRouteErrors makes the router's own 404 (no such path) and 405 (path
+// exists, wrong method) responses use the ApiResponse JSON shape like every
+// other error, instead of net/http's plain-text defaults.
+func jsonRouteErrors(mux *http.ServeMux) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h, pattern := mux.Handler(r)
+		if pattern != "" {
+			mux.ServeHTTP(w, r) // a route matched: normal path
+			return
+		}
+		// No route matched. Run the mux's fallback handler against a
+		// throwaway writer to learn the status (and Allow header for 405).
+		c := &statusCapture{header: http.Header{}, status: http.StatusOK}
+		h.ServeHTTP(c, r)
+		if c.status != http.StatusNotFound && c.status != http.StatusMethodNotAllowed {
+			h.ServeHTTP(w, r) // e.g. a redirect: pass through untouched
+			return
+		}
+		if allow := c.header.Get("Allow"); allow != "" {
+			w.Header().Set("Allow", allow)
+		}
+		writeError(w, c.status, http.StatusText(c.status))
+	})
+}
+
+// statusCapture records a status code and headers and discards the body.
+type statusCapture struct {
+	header http.Header
+	status int
+}
+
+func (c *statusCapture) Header() http.Header         { return c.header }
+func (c *statusCapture) Write(b []byte) (int, error) { return len(b), nil }
+func (c *statusCapture) WriteHeader(code int)        { c.status = code }
 
 func (s *Server) listProducts(w http.ResponseWriter, r *http.Request) {
 	products, err := s.Catalog.List(r.Context())
@@ -148,6 +195,10 @@ func errorType(status int) string {
 		return "forbidden"
 	case http.StatusNotFound:
 		return "not_found"
+	case http.StatusMethodNotAllowed:
+		return "method_not_allowed"
+	case http.StatusServiceUnavailable:
+		return "unavailable"
 	case http.StatusUnprocessableEntity:
 		return "validation_error"
 	default:

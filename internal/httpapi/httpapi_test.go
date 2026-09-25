@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"kart/internal/catalog"
@@ -166,5 +167,81 @@ func TestPlaceOrderResponseShape(t *testing.T) {
 	}
 	if repo.Len() != 1 {
 		t.Errorf("repo has %d orders, want 1", repo.Len())
+	}
+}
+
+func TestRouteErrorsAreJSON(t *testing.T) {
+	ts, _ := newTestServer(t)
+	tests := []struct {
+		method, path string
+		want         int
+		wantAllow    string
+	}{
+		{http.MethodGet, "/nope", 404, ""},
+		{http.MethodGet, "/api/products", 404, ""},
+		{http.MethodGet, "/api/order", 405, "POST"},
+		{http.MethodDelete, "/api/product/1", 405, "GET, HEAD"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.method+" "+tt.path, func(t *testing.T) {
+			req, _ := http.NewRequest(tt.method, ts.URL+tt.path, nil)
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != tt.want {
+				t.Fatalf("status = %d, want %d", resp.StatusCode, tt.want)
+			}
+			if ct := resp.Header.Get("Content-Type"); ct != "application/json" {
+				t.Errorf("Content-Type = %q, want application/json", ct)
+			}
+			if got := resp.Header.Get("Allow"); got != tt.wantAllow {
+				t.Errorf("Allow = %q, want %q", got, tt.wantAllow)
+			}
+			var e APIResponse
+			if err := json.NewDecoder(resp.Body).Decode(&e); err != nil || e.Code != tt.want {
+				t.Fatalf("body = %+v (err %v), want ApiResponse with code %d", e, err, tt.want)
+			}
+		})
+	}
+}
+
+func TestReadiness(t *testing.T) {
+	products, err := catalog.NewSeeded()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ready atomic.Bool
+	s := &Server{
+		Catalog: products,
+		Orders:  &order.Service{Catalog: products, Promo: promo.NewSetValidator(nil), Repo: order.NewMemoryRepository()},
+		Log:     slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Ready:   ready.Load,
+	}
+	ts := httptest.NewServer(s.Handler())
+	defer ts.Close()
+
+	status := func(path string) int {
+		resp, err := http.Get(ts.URL + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+	if got := status("/readyz"); got != 503 {
+		t.Errorf("before ready: /readyz = %d, want 503", got)
+	}
+	ready.Store(true)
+	if got := status("/readyz"); got != 200 {
+		t.Errorf("ready: /readyz = %d, want 200", got)
+	}
+	ready.Store(false) // shutdown started
+	if got := status("/readyz"); got != 503 {
+		t.Errorf("draining: /readyz = %d, want 503", got)
+	}
+	if got := status("/healthz"); got != 200 {
+		t.Errorf("draining: /healthz = %d, want 200 (still alive)", got)
 	}
 }

@@ -4,10 +4,13 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -29,6 +32,12 @@ func run(log *slog.Logger) error {
 	addr := env("ADDR", ":8080")
 	indexPath := env("COUPON_INDEX", "data/valid_coupons.txt")
 	apiKey := env("API_KEY", "apitest")
+	// How long to keep serving after SIGTERM while /readyz reports 503, so a
+	// load balancer can stop routing here before connections are closed.
+	drain, err := time.ParseDuration(env("SHUTDOWN_DRAIN", "0s"))
+	if err != nil {
+		return fmt.Errorf("SHUTDOWN_DRAIN: %w", err)
+	}
 
 	start := time.Now()
 	codes, err := promo.LoadIndexFile(indexPath)
@@ -43,11 +52,13 @@ func run(log *slog.Logger) error {
 		return err
 	}
 
+	var ready atomic.Bool
 	srv := &httpapi.Server{
 		Catalog: products,
 		Orders:  &order.Service{Catalog: products, Promo: validator, Repo: order.NewMemoryRepository()},
 		APIKey:  apiKey,
 		Log:     log,
+		Ready:   ready.Load,
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -77,11 +88,14 @@ func run(log *slog.Logger) error {
 		IdleTimeout:       60 * time.Second,
 	}
 
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return err
+	}
 	errCh := make(chan error, 1)
-	go func() {
-		log.Info("listening", "addr", addr)
-		errCh <- httpSrv.ListenAndServe()
-	}()
+	go func() { errCh <- httpSrv.Serve(ln) }()
+	ready.Store(true) // index and catalog are loaded and the port is open
+	log.Info("listening", "addr", ln.Addr().String())
 
 	select {
 	case err := <-errCh:
@@ -89,7 +103,9 @@ func run(log *slog.Logger) error {
 			return err
 		}
 	case <-ctx.Done():
-		log.Info("shutting down")
+		ready.Store(false)
+		log.Info("shutting down", "drain", drain.String())
+		time.Sleep(drain)
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		return httpSrv.Shutdown(shutdownCtx)
