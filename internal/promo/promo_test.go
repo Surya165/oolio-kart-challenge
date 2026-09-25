@@ -2,6 +2,9 @@ package promo
 
 import (
 	"context"
+	"errors"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -64,5 +67,41 @@ func TestIndexRoundTrip(t *testing.T) {
 	}
 	if _, err := ReadIndex(strings.NewReader("SHORT\n")); err == nil {
 		t.Fatal("expected error for out-of-range code in index")
+	}
+}
+
+func TestLoadIndexFile(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, body string) string {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	tests := []struct {
+		name      string
+		path      string
+		wantCodes int
+		wantErr   error
+	}{
+		{"valid", write("ok.txt", "# header\nHAPPYHRS\nFIFTYOFF\n"), 2, nil},
+		{"empty file", write("empty.txt", ""), 0, ErrEmptyIndex},
+		{"header only", write("header.txt", "# 0 valid codes\n"), 0, ErrEmptyIndex},
+		{"missing file", filepath.Join(dir, "nope.txt"), 0, os.ErrNotExist},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			codes, err := LoadIndexFile(tt.path)
+			if tt.wantErr != nil {
+				if !errors.Is(err, tt.wantErr) {
+					t.Fatalf("err = %v, want %v", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil || len(codes) != tt.wantCodes {
+				t.Fatalf("got %d codes, err %v; want %d codes", len(codes), err, tt.wantCodes)
+			}
+		})
 	}
 }

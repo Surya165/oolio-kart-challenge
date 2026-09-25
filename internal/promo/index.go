@@ -2,6 +2,7 @@ package promo
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -30,14 +31,27 @@ func ReadIndex(r io.Reader) ([]string, error) {
 	return codes, sc.Err()
 }
 
-// LoadIndexFile reads an index artifact from disk.
+// ErrEmptyIndex is returned when an index file contains no codes. A broken
+// build that writes an empty index would otherwise make the server silently
+// reject every promo code, so loading it is treated as an error.
+var ErrEmptyIndex = errors.New("coupon index contains no codes")
+
+// LoadIndexFile reads an index artifact from disk for serving. It fails on an
+// empty index; see ErrEmptyIndex.
 func LoadIndexFile(path string) ([]string, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
-	return ReadIndex(f)
+	codes, err := ReadIndex(f)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	if len(codes) == 0 {
+		return nil, fmt.Errorf("%s: %w", path, ErrEmptyIndex)
+	}
+	return codes, nil
 }
 
 // WriteIndex writes codes in the artifact format read by ReadIndex.
