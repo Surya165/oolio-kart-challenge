@@ -1,0 +1,29 @@
+services:
+  api:
+    build:
+      context: .
+      target: runtime
+    ports:
+      - "8080:8080"
+    environment:
+      API_KEY: ${API_KEY:-apitest}
+    restart: unless-stopped
+
+  # Rebuilds data/valid_coupons.txt from the raw coupon files.
+  # Put couponbase{1,2,3}.gz in ./data, then:
+  #   docker compose --profile index run --rm couponindex
+  #   ENGINE=duckdb docker compose --profile index run --rm couponindex
+  couponindex:
+    profiles: ["index"]
+    build:
+      context: .
+      target: couponindex
+    volumes:
+      - ./data:/data
+    command:
+      - -engine=${ENGINE:-hashjoin}
+      - -out=/data/valid_coupons.txt
+      - -tmp=/data
+      - /data/couponbase1.gz
+      - /data/couponbase2.gz
+      - /data/couponbase3.gz
