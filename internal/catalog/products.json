@@ -1,0 +1,11 @@
+[
+  { "id": "1", "name": "Waffle with Berries", "price": 6.5, "category": "Waffle" },
+  { "id": "2", "name": "Vanilla Bean Crème Brûlée", "price": 7, "category": "Crème Brûlée" },
+  { "id": "3", "name": "Macaron Mix of Five", "price": 8, "category": "Macaron" },
+  { "id": "4", "name": "Classic Tiramisu", "price": 5.5, "category": "Tiramisu" },
+  { "id": "5", "name": "Pistachio Baklava", "price": 4, "category": "Baklava" },
+  { "id": "6", "name": "Lemon Meringue Pie", "price": 5, "category": "Pie" },
+  { "id": "7", "name": "Red Velvet Cake", "price": 4.5, "category": "Cake" },
+  { "id": "8", "name": "Salted Caramel Brownie", "price": 5.5, "category": "Brownie" },
+  { "id": "9", "name": "Vanilla Panna Cotta", "price": 6.5, "category": "Panna Cotta" }
+]
