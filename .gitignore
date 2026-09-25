@@ -1,0 +1,7 @@
+# Raw coupon sources are ~2 GB; download them (see README), never commit them.
+data/*.gz
+.build/
+*.tmp
+/server
+/couponindex
+.DS_Store
