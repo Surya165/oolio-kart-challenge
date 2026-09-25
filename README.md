@@ -22,7 +22,9 @@ Tests: `go test ./...`
 | `GET /api/product/{id}` | 400 if the id isn't a positive integer, 404 if not found |
 | `POST /api/order` | Needs `api_key` header: 401 if missing, 403 if wrong. 400 for bad JSON, 422 for invalid items or promo code |
 
-Errors use the spec's `ApiResponse` shape (`code`, `type`, `message`).
+Errors use the spec's `ApiResponse` shape (`code`, `type`, `message`), including unknown routes (404) and wrong methods (405).
+
+Not in the spec: `GET /healthz` (process is alive) and `GET /readyz` (should receive traffic; returns 503 once shutdown starts, and `SHUTDOWN_DRAIN=5s` keeps serving that long so a load balancer can drain it).
 
 ## Promo codes
 
@@ -31,7 +33,7 @@ A code is valid if it's 8–10 characters long and appears in at least two of th
 So validation is split in two:
 
 - **Offline:** `cmd/couponindex` reads the files once and writes the valid codes to `data/valid_coupons.txt`. That comes out to 8 codes.
-- **Server:** loads that file at startup into an in-memory set behind the `promo.Validator` interface. Sending `SIGHUP` reloads it without a restart.
+- **Server:** loads that file at startup into an in-memory set behind the `promo.Validator` interface. Sending `SIGHUP` reloads it without a restart. An empty index is rejected (at startup and on reload), so a broken build can't silently disable every coupon.
 
 The builder has two engines, chosen with `-engine`:
 
@@ -65,5 +67,6 @@ internal/couponbuild  index builder engines
 ## Not included
 
 - **Discounts:** the spec's `Order` has no price fields, so coupons are only validated.
-- **Persistent orders:** orders are kept in memory behind a `Repository` interface.
+- **Persistent orders and idempotency:** orders are kept in memory behind `order.Repository`. Next step is Postgres, with an `Idempotency-Key` stored in the same transaction as the order so client retries don't create duplicates.
+- **Business rules not in the spec:** redemption limits, per-customer rules and quantity caps are product decisions, so I didn't invent them.
 - **Frontend.**
