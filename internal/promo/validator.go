@@ -13,6 +13,7 @@ package promo
 
 import (
 	"context"
+	"fmt"
 	"sync/atomic"
 )
 
@@ -65,6 +66,22 @@ func (v *SetValidator) Replace(codes []string) {
 		m[c] = struct{}{}
 	}
 	v.codes.Store(&m)
+}
+
+// LoadFrom loads codes from src and swaps them in. If loading fails or the
+// index is empty, the current codes stay in place and an error is returned,
+// so a bad reload never takes coupons offline. It returns the number of codes
+// now loaded.
+func (v *SetValidator) LoadFrom(ctx context.Context, src IndexSource) (int, error) {
+	codes, err := src.Load(ctx)
+	if err != nil {
+		return 0, err
+	}
+	if len(codes) == 0 {
+		return 0, fmt.Errorf("%v: %w", src, ErrEmptyIndex)
+	}
+	v.Replace(codes)
+	return len(codes), nil
 }
 
 // Len returns the number of codes currently loaded.

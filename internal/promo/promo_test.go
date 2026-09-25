@@ -70,38 +70,82 @@ func TestIndexRoundTrip(t *testing.T) {
 	}
 }
 
-func TestLoadIndexFile(t *testing.T) {
+func TestFileIndex(t *testing.T) {
+	ctx := context.Background()
 	dir := t.TempDir()
-	write := func(name, body string) string {
-		p := filepath.Join(dir, name)
-		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		return p
+	idx := FileIndex{Path: filepath.Join(dir, "valid_coupons.txt")}
+
+	if _, err := idx.Load(ctx); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("Load before publish: err = %v, want not-exist", err)
 	}
-	tests := []struct {
-		name      string
-		path      string
-		wantCodes int
-		wantErr   error
+
+	codes := []string{"FIFTYOFF", "HAPPYHRS"}
+	if err := idx.Publish(ctx, codes, "built by test"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := idx.Load(ctx)
+	if err != nil || !slices.Equal(got, codes) {
+		t.Fatalf("Load = %v, %v; want %v", got, err, codes)
+	}
+
+	// Publishing again replaces the index, and leaves no temp files behind.
+	if err := idx.Publish(ctx, []string{"BIRTHDAY"}, ""); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := idx.Load(ctx); !slices.Equal(got, []string{"BIRTHDAY"}) {
+		t.Fatalf("after republish Load = %v", got)
+	}
+	entries, _ := os.ReadDir(dir)
+	if len(entries) != 1 {
+		t.Fatalf("dir has %d entries, want only the index (temp file leaked?)", len(entries))
+	}
+	info, _ := os.Stat(idx.Path)
+	if info.Mode().Perm() != 0o644 {
+		t.Errorf("index mode = %v, want 0644", info.Mode().Perm())
+	}
+}
+
+// fakeSource is an in-memory IndexSource, standing in for S3 or any other
+// backend: LoadFrom's rules must hold whatever the storage is.
+type fakeSource struct {
+	codes []string
+	err   error
+}
+
+func (f fakeSource) Load(context.Context) ([]string, error) { return f.codes, f.err }
+
+func TestLoadFrom(t *testing.T) {
+	ctx := context.Background()
+	v := NewSetValidator(nil)
+
+	if n, err := v.LoadFrom(ctx, fakeSource{codes: []string{"HAPPYHRS", "FIFTYOFF"}}); err != nil || n != 2 {
+		t.Fatalf("LoadFrom = %d, %v; want 2, nil", n, err)
+	}
+
+	// A failed or empty reload must keep the codes already being served.
+	bad := []struct {
+		name    string
+		src     fakeSource
+		wantErr error
 	}{
-		{"valid", write("ok.txt", "# header\nHAPPYHRS\nFIFTYOFF\n"), 2, nil},
-		{"empty file", write("empty.txt", ""), 0, ErrEmptyIndex},
-		{"header only", write("header.txt", "# 0 valid codes\n"), 0, ErrEmptyIndex},
-		{"missing file", filepath.Join(dir, "nope.txt"), 0, os.ErrNotExist},
+		{"source error", fakeSource{err: os.ErrNotExist}, os.ErrNotExist},
+		{"empty index", fakeSource{codes: nil}, ErrEmptyIndex},
 	}
-	for _, tt := range tests {
+	for _, tt := range bad {
 		t.Run(tt.name, func(t *testing.T) {
-			codes, err := LoadIndexFile(tt.path)
-			if tt.wantErr != nil {
-				if !errors.Is(err, tt.wantErr) {
-					t.Fatalf("err = %v, want %v", err, tt.wantErr)
-				}
-				return
+			if _, err := v.LoadFrom(ctx, tt.src); !errors.Is(err, tt.wantErr) {
+				t.Fatalf("err = %v, want %v", err, tt.wantErr)
 			}
-			if err != nil || len(codes) != tt.wantCodes {
-				t.Fatalf("got %d codes, err %v; want %d codes", len(codes), err, tt.wantCodes)
+			if ok, _ := v.Valid(ctx, "HAPPYHRS"); !ok || v.Len() != 2 {
+				t.Fatalf("old index lost after bad reload (len %d)", v.Len())
 			}
 		})
+	}
+
+	// A file that only has a header is empty too.
+	p := filepath.Join(t.TempDir(), "header-only.txt")
+	os.WriteFile(p, []byte("# 0 valid codes\n"), 0o644)
+	if _, err := v.LoadFrom(ctx, FileIndex{Path: p}); !errors.Is(err, ErrEmptyIndex) {
+		t.Fatalf("header-only file: err = %v, want ErrEmptyIndex", err)
 	}
 }

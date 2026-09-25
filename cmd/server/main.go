@@ -39,13 +39,14 @@ func run(log *slog.Logger) error {
 		return fmt.Errorf("SHUTDOWN_DRAIN: %w", err)
 	}
 
+	// Where the index lives is behind promo.IndexSource; a file today.
+	index := promo.FileIndex{Path: indexPath}
+	validator := promo.NewSetValidator(nil)
 	start := time.Now()
-	codes, err := promo.LoadIndexFile(indexPath)
-	if err != nil {
+	if _, err := validator.LoadFrom(context.Background(), index); err != nil {
 		return err
 	}
-	validator := promo.NewSetValidator(codes)
-	log.Info("coupon index loaded", "path", indexPath, "codes", validator.Len(), "took", time.Since(start))
+	log.Info("coupon index loaded", "source", index.String(), "codes", validator.Len(), "took", time.Since(start))
 
 	products, err := catalog.NewSeeded()
 	if err != nil {
@@ -69,13 +70,12 @@ func run(log *slog.Logger) error {
 	signal.Notify(hup, syscall.SIGHUP)
 	go func() {
 		for range hup {
-			codes, err := promo.LoadIndexFile(indexPath)
+			n, err := validator.LoadFrom(context.Background(), index)
 			if err != nil {
 				log.Error("coupon index reload failed; keeping old index", "err", err)
 				continue
 			}
-			validator.Replace(codes)
-			log.Info("coupon index reloaded", "codes", validator.Len())
+			log.Info("coupon index reloaded", "codes", n)
 		}
 	}()
 
